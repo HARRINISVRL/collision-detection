@@ -1,0 +1,98 @@
+#include <Wire.h>
+#include <MPU6050.h>
+#include <ThingSpeak.h>
+#include <ESP8266WiFi.h>
+
+ 
+
+MPU6050 mpu;
+#define SECRET_CH_ID   // replace 0000000 with your channel number
+#define SECRET_WRITE_APIKEY " " // replace XYZ with your channel write API Key
+
+ 
+
+
+const int vibrationSensorPin = D1; // Vibration sensor output pin
+const int interruptPin = D2;      // MPU6050 interrupt pin
+
+ 
+
+volatile int accidentDetected = 0; // Variable to indicate accident detection
+
+ 
+
+// ThingSpeak settings
+const char* ssid = " ";
+const char* password = " ";
+unsigned long channelID = SECRET_CH_ID; // Replace with your ThingSpeak channel ID
+const char* writeAPIKey = SECRET_WRITE_APIKEY; // Replace with your ThingSpeak Write API Key
+
+ 
+
+// Function to handle MPU6050 interrupts
+void handleInterrupt() {
+  accidentDetected = 1;
+}
+WiFiClient client;
+void setup() {
+  Serial.begin(9600);
+  pinMode(vibrationSensorPin, INPUT);
+  pinMode(interruptPin, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(interruptPin), handleInterrupt, RISING);
+
+  Wire.begin(); // Initialize I2C communication
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+
+  // Initialize ThingSpeak
+  ThingSpeak.begin(client);
+
+  // Initialize MPU6050
+  mpu.initialize();
+  mpu.setDMPEnabled(false); // Disable the Digital Motion Processor for this example
+}
+
+ 
+
+void loop() {
+  // Check if an accident has been detected
+  if (accidentDetected) {
+    Serial.println("Collision detected!");
+
+    // Read accelerometer and gyroscope values
+    int16_t accelerometer_x, accelerometer_y, accelerometer_z;
+    int16_t gyroscope_x, gyroscope_y, gyroscope_z;
+    mpu.getAcceleration(&accelerometer_x, &accelerometer_y, &accelerometer_z);
+    mpu.getRotation(&gyroscope_x, &gyroscope_y, &gyroscope_z);
+
+    // Send data to ThingSpeak
+    int field1 = accelerometer_x;
+    int field2 = accelerometer_y;
+    int field3 = accelerometer_z;
+    int field4 = gyroscope_x;
+    int field5 = gyroscope_y;
+    int field6 = gyroscope_z;
+    int vibrationValue = digitalRead(vibrationSensorPin);
+
+    ThingSpeak.writeField(channelID, 1, field1, writeAPIKey);
+    ThingSpeak.writeField(channelID, 2, field2, writeAPIKey);
+    ThingSpeak.writeField(channelID, 3, field3, writeAPIKey);
+    ThingSpeak.writeField(channelID, 4, field4, writeAPIKey);
+    ThingSpeak.writeField(channelID, 5, field5, writeAPIKey);
+    ThingSpeak.writeField(channelID, 6, field6, writeAPIKey);
+    ThingSpeak.writeField(channelID, 7, vibrationValue, writeAPIKey);
+
+    // Clear the accident flag
+    accidentDetected = 0;
+  }
+
+  // Other code or operations can go here if needed
+  // Remember to add some delay so that the loop doesn't run too fast
+  delay(1000);
+}
