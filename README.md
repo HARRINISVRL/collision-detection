@@ -4,5 +4,3 @@ These sensors continuously monitor the vehicle's movements, capturing crucial da
 
 
 
-![image](https://github.com/user-attachments/assets/3009cfef-45f8-4ca2-bae9-b454fcb30711)
-![image](https://github.com/user-attachments/assets/e30d7c59-cb33-47e6-92da-3bb1da2cc742)
