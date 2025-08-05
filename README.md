@@ -90,3 +90,26 @@ An IoT-based real-time accident detection and alerting system using **ESP8266**,
 | 🍺 Alcohol > Threshold + Vehicle Idle | Disable Ignition via Relay |
 | 🧠 Cooldown period                    | Prevents repeated triggers |
 
+## 📊 ThingSpeak Data Mapping
+| Field  | Data                                           |
+| ------ | ---------------------------------------------- |
+| Field1 | Accel X                                        |
+| Field2 | Accel Y                                        |
+| Field3 | Accel Z                                        |
+| Field4 | Gyro X                                         |
+| Field5 | Gyro Y                                         |
+| Field6 | Vibration (0/1)                                |
+| Field7 | Alcohol (MQ-3 analog value)                    |
+| Field8 | Severity (1 = light, 2 = moderate, 3 = severe) |
+
+## 📜 License
+This project is open-source under the MIT License. Feel free to use, modify, and share with attribution.
+
+📫 Contact
+
+For questions, collaboration, or feedback:
+
+Open an issue on GitHub
+
+Or contact the developer via email (rlharrini@gmail.com) or via LinkedIn (www.linkedin.com/in/harrinirl26)
+---
