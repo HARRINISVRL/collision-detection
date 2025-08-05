@@ -105,7 +105,7 @@ An IoT-based real-time accident detection and alerting system using **ESP8266**,
 ## 📜 License
 This project is open-source under the MIT License. Feel free to use, modify, and share with attribution.
 
-📫 Contact
+## 📫 Contact
 
 For questions, collaboration, or feedback:
 
