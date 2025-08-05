@@ -7,51 +7,39 @@
 MPU6050 mpu;
 
 // ----- USER CONFIG -----
-#define SECRET_CH_ID        1234567UL      // replace with your channel number
+#define SECRET_CH_ID        1234567UL        // replace with your channel number
 #define SECRET_WRITE_APIKEY "YOUR_WRITE_KEY" // replace with your ThingSpeak Write API Key
 const char* ssid = "YOUR_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-const char* webhookURL = ""; // optional: set a webhook URL for HTTP POST alerts (leave blank to skip)
+const char* webhookURL = ""; // optional webhook URL
 unsigned long channelID = SECRET_CH_ID;
 const char* writeAPIKey = SECRET_WRITE_APIKEY;
 
 // Pins
-const int vibrationSensorPin = D1; // digital vibration sensor
-const int interruptPin = D2;      // MPU6050 interrupt pin
-const int ignitionDisablePin = D5; // relay control (active HIGH by default)
-const int alcoholSensorPin = A0;  // MQ-3 analog
+const int vibrationSensorPin = D1;
+const int interruptPin = D2;
+const int ignitionDisablePin = D5;
+const int alcoholSensorPin = A0;
 
-// ----- TUNABLE PARAMETERS -----
-const float accelScale = 16384.0; // raw accel LSB for ±2g
-const float gyroScale  = 131.0;   // raw gyro LSB for ±250deg/s
-
-// Adaptive baseline/EMA (for accel magnitude)
-const float emaAlpha = 0.02;      // lower -> slower baseline adaptation
+// ----- PARAMETERS -----
+const float accelScale = 16384.0;
+const float gyroScale  = 131.0;
+const float emaAlpha = 0.02;
 float accelBaseline = 0.0;
+const float wAccel = 0.6, wGyro = 0.2, wVibe = 0.1, wAlcohol = 0.4;
+const float accelSpikeThresholdG = 2.0;
+const int vibrationActive = HIGH;
+const int alcoholThresholdRaw = 300;
+const float confirmScoreThreshold = 0.8;
+const unsigned long confirmWindowMs = 1500;
+const unsigned long postDelayMs = 5000;
+const int ignitionDisableHoldMs = 60000;
 
-// Weighted fusion parameters
-const float wAccel = 0.6;
-const float wGyro  = 0.2;
-const float wVibe  = 0.1;
-const float wAlcohol = 0.4; // alcohol adds strongly to score when present
-
-// thresholds
-const float accelSpikeThresholdG = 2.0;    // spike above baseline in g to consider (can tune)
-const int vibrationActive = HIGH;          // depends on your vibration sensor
-const int alcoholThresholdRaw = 300;       // raw A0 threshold (tune with experiment)
-const float confirmScoreThreshold = 0.8;   // when weighted score exceeds this -> confirm crash
-const unsigned long confirmWindowMs = 1500; // milliseconds window to confirm crash
-const unsigned long postDelayMs = 5000;    // wait after event before re-arming
-
-// Ignition disable logic
-const int ignitionDisableHoldMs = 60000; // how long to hold disable after triggered (ms)
 bool ignitionDisabled = false;
 unsigned long ignitionDisabledUntil = 0;
 
-// Networking
 WiFiClient client;
 
-// ISR flag
 volatile unsigned long lastMpuInterruptAt = 0;
 volatile bool mpuInterruptFlag = false;
 void IRAM_ATTR handleInterrupt() {
@@ -60,7 +48,6 @@ void IRAM_ATTR handleInterrupt() {
 }
 
 void sendAlert(float ax_g, float ay_g, float az_g, float gx_dps, float gy_dps, float gz_dps, int vibration, int alcoholRaw, const char* severity) {
-  // Write multiple fields atomically
   ThingSpeak.setField(1, ax_g);
   ThingSpeak.setField(2, ay_g);
   ThingSpeak.setField(3, az_g);
@@ -69,10 +56,9 @@ void sendAlert(float ax_g, float ay_g, float az_g, float gx_dps, float gy_dps, f
   ThingSpeak.setField(6, gz_dps);
   ThingSpeak.setField(7, vibration);
   ThingSpeak.setField(8, alcoholRaw);
-  ThingSpeak.setField(9, severity);
+  ThingSpeak.setStatus(String("Severity: ") + severity);
   ThingSpeak.writeFields(channelID, writeAPIKey);
 
-  // Optional webhook POST (JSON)
   if (webhookURL && strlen(webhookURL) > 5) {
     HTTPClient http;
     http.begin(client, webhookURL);
@@ -89,11 +75,7 @@ void sendAlert(float ax_g, float ay_g, float az_g, float gx_dps, float gy_dps, f
     payload += "\"severity\":\"" + String(severity) + "\"";
     payload += "}";
     int httpCode = http.POST(payload);
-    if (httpCode > 0) {
-      Serial.printf("Webhook POST: %d\n", httpCode);
-    } else {
-      Serial.printf("Webhook failed: %s\n", http.errorToString(httpCode).c_str());
-    }
+    Serial.printf("Webhook POST: %d\n", httpCode);
     http.end();
   }
 }
@@ -105,19 +87,15 @@ void setup() {
   pinMode(vibrationSensorPin, INPUT);
   pinMode(interruptPin, INPUT_PULLUP);
   pinMode(ignitionDisablePin, OUTPUT);
-  digitalWrite(ignitionDisablePin, LOW); // ensure relay off initially
+  digitalWrite(ignitionDisablePin, LOW);
 
-  // MPU interrupt attach
   attachInterrupt(digitalPinToInterrupt(interruptPin), handleInterrupt, RISING);
 
   Wire.begin();
   mpu.initialize();
   mpu.setDMPEnabled(false);
-
-  // Initial baseline
   accelBaseline = 0.0;
 
-  // Connect to Wi-Fi
   Serial.println("Connecting to WiFi...");
   WiFi.begin(ssid, password);
   unsigned long startWiFi = millis();
@@ -125,112 +103,95 @@ void setup() {
     delay(500);
     Serial.print(".");
     if (millis() - startWiFi > 15000) {
-      Serial.println("\nWiFi connect timeout, continuing (check credentials).");
+      Serial.println("\nWiFi connect timeout, continuing.");
       break;
     }
   }
   Serial.println("\nWiFi connected.");
-
   ThingSpeak.begin(client);
 }
+
+// ----- TIMING CONTROL -----
+const unsigned long sampleInterval = 120; // sampling interval in ms
+unsigned long lastSampleTime = 0;
 
 unsigned long lastEventAt = 0;
 bool eventArmed = true;
 
 void loop() {
-  // regular sampling (not only ISR-driven)
-  int16_t ax_raw, ay_raw, az_raw;
-  int16_t gx_raw, gy_raw, gz_raw;
+  unsigned long currentMillis = millis();
 
-  mpu.getAcceleration(&ax_raw, &ay_raw, &az_raw);
-  mpu.getRotation(&gx_raw, &gy_raw, &gz_raw);
+  if (currentMillis - lastSampleTime >= sampleInterval) {
+    lastSampleTime = currentMillis;
 
-  // Convert to engineering units
-  float ax_g = (float)ax_raw / accelScale;
-  float ay_g = (float)ay_raw / accelScale;
-  float az_g = (float)az_raw / accelScale;
-  float gx_dps = (float)gx_raw / gyroScale;
-  float gy_dps = (float)gy_raw / gyroScale;
-  float gz_dps = (float)gz_raw / gyroScale;
+    int16_t ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+    mpu.getAcceleration(&ax_raw, &ay_raw, &az_raw);
+    mpu.getRotation(&gx_raw, &gy_raw, &gz_raw);
 
-  // calc accel magnitude (g)
-  float accelMag = sqrt(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
+    float ax_g = (float)ax_raw / accelScale;
+    float ay_g = (float)ay_raw / accelScale;
+    float az_g = (float)az_raw / accelScale;
+    float gx_dps = (float)gx_raw / gyroScale;
+    float gy_dps = (float)gy_raw / gyroScale;
+    float gz_dps = (float)gz_raw / gyroScale;
 
-  // update EMA baseline
-  if (accelBaseline == 0.0) accelBaseline = accelMag;
-  accelBaseline = (1.0 - emaAlpha) * accelBaseline + emaAlpha * accelMag;
+    float accelMag = sqrt(ax_g * ax_g + ay_g * ay_g + az_g * az_g);
+    if (accelBaseline == 0.0) accelBaseline = accelMag;
+    accelBaseline = (1.0 - emaAlpha) * accelBaseline + emaAlpha * accelMag;
 
-  // normalized spike (how far above baseline, clipped)
-  float accelDeltaG = accelMag - accelBaseline; // in g
-  float accelScore = constrain(accelDeltaG / accelSpikeThresholdG, 0.0, 1.0);
+    float accelDeltaG = accelMag - accelBaseline;
+    float accelScore = constrain(accelDeltaG / accelSpikeThresholdG, 0.0, 1.0);
+    float gyroMag = sqrt(gx_dps * gx_dps + gy_dps * gy_dps + gz_dps * gz_dps);
+    float gyroScore = constrain(gyroMag / 200.0, 0.0, 1.0);
 
-  // gyro magnitude normalized (rough)
-  float gyroMag = sqrt(gx_dps*gx_dps + gy_dps*gy_dps + gz_dps*gz_dps);
-  float gyroScore = constrain(gyroMag / 200.0, 0.0, 1.0); // 200deg/s considered large
+    int vibrationValue = digitalRead(vibrationSensorPin);
+    float vibeScore = (vibrationValue == vibrationActive) ? 1.0 : 0.0;
 
-  // vibration sensor
-  int vibrationValue = digitalRead(vibrationSensorPin);
-  float vibeScore = (vibrationValue == vibrationActive) ? 1.0 : 0.0;
+    int alcoholRaw = analogRead(alcoholSensorPin);
+    bool alcoholFlag = (alcoholRaw >= alcoholThresholdRaw);
+    float alcoholScore = alcoholFlag ? 1.0 : 0.0;
 
-  // alcohol sensor raw
-  int alcoholRaw = analogRead(alcoholSensorPin);
-  bool alcoholFlag = (alcoholRaw >= alcoholThresholdRaw);
-  float alcoholScore = alcoholFlag ? 1.0 : 0.0;
+    float fusionScore = (wAccel * accelScore + wGyro * gyroScore + wVibe * vibeScore + wAlcohol * alcoholScore) / (wAccel + wGyro + wVibe + wAlcohol);
 
-  // Weighted fusion score (note alcohol has its own weight)
-  float fusionDenom = wAccel + wGyro + wVibe + wAlcohol;
-  float fusionScore = (wAccel * accelScore + wGyro * gyroScore + wVibe * vibeScore + wAlcohol * alcoholScore) / fusionDenom;
+    Serial.printf("a=%.2fg base=%.2fg d=%.2fg s=%.2f g=%.1fdps gs=%.2f v=%d vs=%.2f alc=%d fs=%.3f\n",
+                  accelMag, accelBaseline, accelDeltaG, accelScore, gyroMag, gyroScore, vibrationValue, vibeScore, alcoholRaw, fusionScore);
 
-  // Debug output
-  Serial.printf("a=%.2fg baseline=%.2fg d=%.2fg s=%.2f g=%.1fdps gs=%.2f v=%d vs=%.2f alc=%d fs=%.3f\n",
-                accelMag, accelBaseline, accelDeltaG, accelScore, gyroMag, gyroScore, vibrationValue, vibeScore, alcoholRaw, fusionScore);
+    static unsigned long confirmStart = 0;
+    if (fusionScore >= confirmScoreThreshold) {
+      if (confirmStart == 0) confirmStart = currentMillis;
+      if (currentMillis - confirmStart >= confirmWindowMs && eventArmed) {
+        const char* severity = "light";
+        if (accelDeltaG > 4.0) severity = "severe";
+        else if (accelDeltaG > 2.5) severity = "moderate";
 
-  // Confirm logic: require fusionScore > threshold within a small window of recent samples or MPU interrupt
-  static unsigned long confirmStart = 0;
-  if (fusionScore >= confirmScoreThreshold) {
-    if (confirmStart == 0) confirmStart = millis();
-    // if maintained for confirmWindowMs -> confirm crash
-    if (millis() - confirmStart >= confirmWindowMs && eventArmed) {
-      // Determine severity
-      const char* severity = "light";
-      if (accelDeltaG > 4.0) severity = "severe";
-      else if (accelDeltaG > 2.5) severity = "moderate";
+        Serial.println(">>> Collision CONFIRMED! Sending alert...");
+        sendAlert(ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps, vibrationValue, alcoholRaw, severity);
 
-      Serial.println(">>> Collision CONFIRMED! Sending alert...");
-      sendAlert(ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps, vibrationValue, alcoholRaw, severity);
+        lastEventAt = currentMillis;
+        eventArmed = false;
+        confirmStart = 0;
 
-      lastEventAt = millis();
-      eventArmed = false;
-      confirmStart = 0;
-
-      // If alcohol present and vehicle appears stationary -> disable ignition (prototype logic)
-      // Here we use low movement check: baseline close to 1g (no large motion) AND low accelDelta
-      bool vehicleStationary = (accelBaseline < 1.2 && accelDeltaG < 0.2);
-      if (alcoholFlag && vehicleStationary) {
-        Serial.println("Alcohol detected AND vehicle likely stationary -> disabling ignition (prototype).");
-        digitalWrite(ignitionDisablePin, HIGH); // activate relay to disable ignition
-        ignitionDisabled = true;
-        ignitionDisabledUntil = millis() + ignitionDisableHoldMs;
+        bool vehicleStationary = (accelBaseline < 1.2 && accelDeltaG < 0.2);
+        if (alcoholFlag && vehicleStationary) {
+          Serial.println("Alcohol + Stationary -> Ignition disabled.");
+          digitalWrite(ignitionDisablePin, HIGH);
+          ignitionDisabled = true;
+          ignitionDisabledUntil = currentMillis + ignitionDisableHoldMs;
+        }
       }
+    } else {
+      confirmStart = 0;
     }
-  } else {
-    // Reset confirm start if fusion falls below threshold
-    confirmStart = 0;
   }
 
-  // Re-arm logic after postDelayMs
   if (!eventArmed && millis() - lastEventAt > postDelayMs) {
     eventArmed = true;
     Serial.println("Re-armed.");
   }
 
-  // Release ignition disable after hold time
   if (ignitionDisabled && millis() > ignitionDisabledUntil) {
-    Serial.println("Re-enabling ignition output.");
+    Serial.println("Re-enabling ignition.");
     digitalWrite(ignitionDisablePin, LOW);
     ignitionDisabled = false;
   }
-
-  // small delay to control sample rate
-  delay(120);
 }
